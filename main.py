@@ -2,18 +2,6 @@ import torch as t
 from torch import nn
 
 
-def reconstruction_loss(activation_NLD: t.Tensor, target_NLD: t.Tensor) -> t.Tensor:
-    x_NL = (activation_NLD - target_NLD).norm(dim=-1).square()
-    x_N = x_NL.sum(dim=-1)
-    return x_N.mean()
-
-
-def sparsity_loss(dec_weights_LDH: t.Tensor, hidden_NH: t.Tensor) -> t.Tensor:
-    dec_weights_norm_LH = dec_weights_LDH.norm(dim=1)
-    dec_weights_norm_H = t.einsum("lh->h", dec_weights_norm_LH)
-    return t.einsum("nh,h->n", hidden_NH, dec_weights_norm_H).mean()
-
-
 class CausalCrosscoder(nn.Module):
     def __init__(self, n_layers_out: int, layer_dim: int, hidden_dim: int):
         super(CausalCrosscoder, self).__init__()
@@ -96,23 +84,25 @@ class Crosscoder(nn.Module):
         reconstructed_NLD = self.decode(hidden_NH)
         return reconstructed_NLD
 
-    def sparsity_loss(self, hidden_NH: t.Tensor) -> t.Tensor:
-        dec_weights_norm_LH = self.dec_weights_LDH.norm(dim=1)
-        dec_weights_norm_H = t.einsum("lh->h", dec_weights_norm_LH)
-        return t.einsum("nh,h->n", hidden_NH, dec_weights_norm_H).mean()
-
-    def reconstruction_loss(self, activation_NLD: t.Tensor, target_NLD: t.Tensor) -> t.Tensor:
-        x_NL = (activation_NLD - target_NLD).norm(dim=-1).square()
-        x_N = t.einsum("nl->n", x_NL)
-        return x_N.mean()
-
     def forward_train(self, activation_NLD: t.Tensor) -> tuple[t.Tensor, t.Tensor]:
         hidden_NH = self.encode(activation_NLD)
         reconstructed_NLD = self.decode(hidden_NH)
-        reconstruction_loss = self.reconstruction_loss(reconstructed_NLD, activation_NLD)
-        sparsity_loss = self.sparsity_loss(hidden_NH)
-        loss = reconstruction_loss + sparsity_loss
+        reconstruction_loss_ = reconstruction_loss(reconstructed_NLD, activation_NLD)
+        sparsity_loss_ = sparsity_loss(self.dec_weights_LDH, hidden_NH)
+        loss = reconstruction_loss_ + sparsity_loss_
         return reconstructed_NLD, loss
+
+
+def reconstruction_loss(activation_NLD: t.Tensor, target_NLD: t.Tensor) -> t.Tensor:
+    x_NL = (activation_NLD - target_NLD).norm(dim=-1).square()
+    x_N = x_NL.sum(dim=-1)
+    return x_N.mean()
+
+
+def sparsity_loss(dec_weights_LDH: t.Tensor, hidden_NH: t.Tensor) -> t.Tensor:
+    dec_weights_norm_LH = dec_weights_LDH.norm(dim=1)
+    dec_weights_norm_H = t.einsum("lh->h", dec_weights_norm_LH)
+    return t.einsum("nh,h->n", hidden_NH, dec_weights_norm_H).mean()
 
 
 if __name__ == "__main__":
