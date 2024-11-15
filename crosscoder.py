@@ -4,7 +4,7 @@ from torch import nn
 
 class CausalCrosscoder(nn.Module):
     def __init__(self, n_layers_out: int, layer_dim: int, hidden_dim: int):
-        super(CausalCrosscoder, self).__init__()
+        super().__init__()
 
         self.enc_weights_HD = nn.Parameter(t.randn(hidden_dim, layer_dim))
         self.enc_bias_H = nn.Parameter(t.zeros(hidden_dim))
@@ -50,9 +50,9 @@ class CausalCrosscoder(nn.Module):
         return reconstructed_NLD, loss
 
 
-class Crosscoder(nn.Module):
+class AcausalCrosscoder(nn.Module):
     def __init__(self, n_layers: int, layer_dim: int, hidden_dim: int):
-        super(Crosscoder, self).__init__()
+        super().__init__()
 
         self.enc_weights_LHD = nn.Parameter(t.randn(n_layers, hidden_dim, layer_dim))
         self.enc_bias_H = nn.Parameter(t.zeros(hidden_dim))
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     layer_dim = 16
     hidden_dim = 256
 
-    crosscoder = Crosscoder(
+    crosscoder = AcausalCrosscoder(
         n_layers=n_layers,
         layer_dim=layer_dim,
         hidden_dim=hidden_dim,
