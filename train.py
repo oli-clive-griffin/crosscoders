@@ -1,38 +1,60 @@
 from typing import Iterator
 
 import einops
+import einops.experimental
 import numpy as np
 import torch
+from torch.nn.utils import clip_grad_norm_
 from datasets import Dataset, load_dataset  # type: ignore
+from transformers import PreTrainedTokenizer, AutoTokenizer  # type: ignore
 
 from crosscoder import AcausalCrosscoder
 from llm import LLMWithCache
 
+device = (
+    "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+)
+
 
 def train():
-    llm = LLMWithCache()
-    crosscoder = AcausalCrosscoder(n_layers=23, layer_dim=2048, hidden_dim=2**10)  # * 8)
+    model_name = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
+
+    llm = LLMWithCache(model_name).to(device)
+    crosscoder = AcausalCrosscoder(n_layers=23, layer_dim=2048, hidden_dim=32_768).to(device)
     optimizer = torch.optim.Adam(crosscoder.parameters(), lr=1e-3)
-    dataset = load_dataset("PleIAs/common_corpus", streaming=True)
-    dataloader = iter_dataset(dataset)
-    for batch in dataloader:
+
+    for batch_NS in get_dataloader(model_name, batch_size=16, sequence_length=64):
+        batch_NS = batch_NS.to(device)
         optimizer.zero_grad()
-        hidden_states = llm.get_residual_stream(batch)
-        hidden_states_NSLD = torch.from_numpy(np.stack(hidden_states))
-        hidden_states_NLD = einops.rearrange(hidden_states_NSLD, "n s l d -> (n s) l d")
-        hidden_states_NLD, loss = crosscoder.forward_train(hidden_states_NLD)
+        hidden_states_NLD = llm.get_residual_stream_NLD(batch_NS)
+        hidden_states_NLD = torch.tensor(hidden_states_NLD, dtype=torch.bfloat16).to(device)
+        _, loss = crosscoder.forward_train(hidden_states_NLD)
         print(f"loss: {loss.item():.4f}")
+        clip_grad_norm_(crosscoder.parameters(), 1.0)
         loss.backward()
         optimizer.step()
 
 
-def iter_dataset(
-    ds: Dataset, batch_size: int = 4, sequence_length: int = 1024
-) -> Iterator[list[str]]:
-    for example in ds["train"]:
-        for i in range(0, len(example["text"]), batch_size * sequence_length):
-            text = example["text"][i : i + batch_size * sequence_length]
-            yield [text[j : j + sequence_length] for j in range(0, len(text), sequence_length)]
+# TODO use buffer to shuffle and draw from buffer
+def get_dataloader(model_name: str, batch_size: int, sequence_length: int) -> Iterator[torch.Tensor]:
+    dataset = load_dataset("PleIAs/common_corpus", streaming=True, cache_dir="tmp/cache")
+
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name, pad_token="<pad>")
+    batch_length = batch_size * sequence_length
+
+    for example in dataset["train"]:
+        text_tokens = torch.tensor(tokenizer(example["text"])["input_ids"])
+
+        n_tokens_rounded = round_down(len(text_tokens), batch_length)
+        text_tokens = text_tokens[:n_tokens_rounded]
+
+        for batch_Ns in torch.split(text_tokens, batch_length):
+            batch_NS = einops.rearrange(batch_Ns, "(n s) -> n s", n=batch_size)
+            yield batch_NS
+
+
+def round_down(n: int, multiple: int) -> int:
+    return (n // multiple) * multiple
 
 
 if __name__ == "__main__":
