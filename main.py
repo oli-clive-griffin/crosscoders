@@ -2,9 +2,21 @@ import torch as t
 from torch import nn
 
 
-class CausalCrossCoder(nn.Module):
+def reconstruction_loss(activation_NLD: t.Tensor, target_NLD: t.Tensor) -> t.Tensor:
+    x_NL = (activation_NLD - target_NLD).norm(dim=-1).square()
+    x_N = x_NL.sum(dim=-1)
+    return x_N.mean()
+
+
+def sparsity_loss(dec_weights_LDH: t.Tensor, hidden_NH: t.Tensor) -> t.Tensor:
+    dec_weights_norm_LH = dec_weights_LDH.norm(dim=1)
+    dec_weights_norm_H = t.einsum("lh->h", dec_weights_norm_LH)
+    return t.einsum("nh,h->n", hidden_NH, dec_weights_norm_H).mean()
+
+
+class CausalCrosscoder(nn.Module):
     def __init__(self, n_layers_out: int, layer_dim: int, hidden_dim: int):
-        super(CausalCrossCoder, self).__init__()
+        super(CausalCrosscoder, self).__init__()
 
         self.enc_weights_HD = nn.Parameter(t.randn(hidden_dim, layer_dim))
         self.enc_bias_H = nn.Parameter(t.zeros(hidden_dim))
@@ -50,21 +62,9 @@ class CausalCrossCoder(nn.Module):
         return reconstructed_NLD, loss
 
 
-def reconstruction_loss(activation_NLD: t.Tensor, target_NLD: t.Tensor) -> t.Tensor:
-    x_NL = (activation_NLD - target_NLD).norm(dim=-1).square()
-    x_N = t.einsum("nl->n", x_NL)
-    return x_N.mean()
-
-
-def sparsity_loss(dec_weights_LDH: t.Tensor, hidden_NH: t.Tensor) -> t.Tensor:
-    dec_weights_norm_LH = dec_weights_LDH.norm(dim=1)
-    dec_weights_norm_H = t.einsum("lh->h", dec_weights_norm_LH)
-    return t.einsum("nh,h->n", hidden_NH, dec_weights_norm_H).mean()
-
-
-class CrossCoder(nn.Module):
+class Crosscoder(nn.Module):
     def __init__(self, n_layers: int, layer_dim: int, hidden_dim: int):
-        super(CrossCoder, self).__init__()
+        super(Crosscoder, self).__init__()
 
         self.enc_weights_LHD = nn.Parameter(t.randn(n_layers, hidden_dim, layer_dim))
         self.enc_bias_H = nn.Parameter(t.zeros(hidden_dim))
@@ -120,11 +120,30 @@ if __name__ == "__main__":
     n_layers = 4
     layer_dim = 16
     hidden_dim = 256
-    model = CrossCoder(n_layers=n_layers, layer_dim=layer_dim, hidden_dim=hidden_dim)
-    x_NLD = t.randn(batch_size, n_layers, layer_dim)
-    y_NLD = model.forward(x_NLD)
-    assert y_NLD.shape == x_NLD.shape
 
-    y_NLD, loss = model.forward_train(x_NLD)
-    assert y_NLD.shape == x_NLD.shape
+    crosscoder = Crosscoder(
+        n_layers=n_layers,
+        layer_dim=layer_dim,
+        hidden_dim=hidden_dim,
+    )
+    activations_NLD = t.randn(batch_size, n_layers, layer_dim)
+    y_NLD = crosscoder.forward(activations_NLD)
+    assert y_NLD.shape == activations_NLD.shape
+    y_NLD, loss = crosscoder.forward_train(activations_NLD)
+    assert y_NLD.shape == activations_NLD.shape
+    assert loss.shape == ()
+
+    causal_crosscoder = CausalCrosscoder(
+        n_layers_out=n_layers - 1,
+        layer_dim=layer_dim,
+        hidden_dim=hidden_dim,
+    )
+    activations_NLD = t.randn(batch_size, n_layers, layer_dim)
+    input_N1D, later_activations_NLD = activations_NLD.split([1, n_layers - 1], dim=1)
+    input_ND = input_N1D.squeeze(1)
+    assert input_ND.shape == (batch_size, layer_dim)
+    assert later_activations_NLD.shape == (batch_size, n_layers - 1, layer_dim)
+
+    y_NLD, loss = causal_crosscoder.forward_train(input_ND, later_activations_NLD)
+    assert y_NLD.shape == later_activations_NLD.shape
     assert loss.shape == ()
