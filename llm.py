@@ -13,6 +13,7 @@ class LLMWithCache:
             torch_dtype=dtype,
             trust_remote_code=True,
         )
+        self.hidden_size = self.model.config.hidden_size
 
     def to(self, device: str) -> "LLMWithCache":
         self.model = self.model.to(device)
@@ -34,12 +35,3 @@ class LLMWithCache:
         layer_states_NSLD = np.permute_dims(layer_states_LNSD, (1, 2, 0, 3))
         layer_states_NsLD = einops.rearrange(layer_states_NSLD, "n s l d -> (n s) l d")
         return layer_states_NsLD
-
-
-if __name__ == "__main__":
-    texts = [
-        "The quick brown fox jumps over the lazy dog",
-        "The five boxing wizards jump quickly",
-        "Hello world",
-    ]
-    hidden_states = LLMWithCache().get_residual_stream(texts)

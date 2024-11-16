@@ -1,32 +1,38 @@
+from dataclasses import dataclass
+from einops import rearrange
 import torch as t
 from torch import nn
+@dataclass
+class Losses:
+    reconstruction_loss: t.Tensor
+    sparsity_loss: t.Tensor
 
 
 class CausalCrosscoder(nn.Module):
     def __init__(self, n_layers_out: int, layer_dim: int, hidden_dim: int):
         super().__init__()
 
-        self.enc_weights_HD = nn.Parameter(t.randn(hidden_dim, layer_dim))
-        self.enc_bias_H = nn.Parameter(t.zeros(hidden_dim))
+        self.W_enc_HD = nn.Parameter(t.randn(hidden_dim, layer_dim))
+        self.b_enc_H = nn.Parameter(t.zeros(hidden_dim))
 
-        self.dec_weights_LDH = nn.Parameter(t.randn(n_layers_out, layer_dim, hidden_dim))
-        self.dec_bias_LD = nn.Parameter(t.zeros(n_layers_out, layer_dim))
+        self.W_dec_LDH = nn.Parameter(t.randn(n_layers_out, layer_dim, hidden_dim))
+        self.b_dec_LD = nn.Parameter(t.zeros(n_layers_out, layer_dim))
 
     def encode(self, activation_ND: t.Tensor) -> t.Tensor:
         """Encodes activations from one layer.
 
         activation_ND: (batch_size, layer_dim)
         """
-        hidden_NH = t.einsum("nd,hd->nh", activation_ND, self.enc_weights_HD)
-        hidden_NH += self.enc_bias_H
+        hidden_NH = t.einsum("nd,hd->nh", activation_ND, self.W_enc_HD)
+        hidden_NH += self.b_enc_H
         return t.relu(hidden_NH)
 
     def decode(self, hidden_NH: t.Tensor) -> t.Tensor:
         """
         hidden_NH: (batch_size, hidden_dim)
         """
-        activation_NLD = t.einsum("nh,ldh->nld", hidden_NH, self.dec_weights_LDH)
-        activation_NLD += self.dec_bias_LD
+        activation_NLD = t.einsum("nh,ldh->nld", hidden_NH, self.W_dec_LDH)
+        activation_NLD += self.b_dec_LD
         return activation_NLD
 
     def forward(self, activation_ND: t.Tensor) -> t.Tensor:
@@ -45,35 +51,49 @@ class CausalCrosscoder(nn.Module):
         hidden_NH = self.encode(activation_ND)
         reconstructed_NLD = self.decode(hidden_NH)
         reconstruction_loss_ = reconstruction_loss(reconstructed_NLD, future_activations_NLD)
-        sparsity_loss_ = sparsity_loss(self.dec_weights_LDH, hidden_NH)
+        sparsity_loss_ = sparsity_loss(self.W_dec_LDH, hidden_NH)
         loss = reconstruction_loss_ + sparsity_loss_
         return reconstructed_NLD, loss
 
 
 class AcausalCrosscoder(nn.Module):
-    def __init__(self, n_layers: int, layer_dim: int, hidden_dim: int):
+    def __init__(self, n_layers: int, layer_dim: int, hidden_dim: int, dec_init_norm: float):
         super().__init__()
 
-        self.enc_weights_LHD = nn.Parameter(t.randn(n_layers, hidden_dim, layer_dim))
-        self.enc_bias_H = nn.Parameter(t.zeros(hidden_dim))
+        self.W_enc_LHD = nn.Parameter(t.randn(n_layers, hidden_dim, layer_dim))
+        self.b_enc_H = nn.Parameter(t.zeros(hidden_dim))
 
-        self.dec_weights_LDH = nn.Parameter(t.randn(n_layers, layer_dim, hidden_dim))
-        self.dec_bias_LD = nn.Parameter(t.zeros(n_layers, layer_dim))
+        self.W_dec_LDH = nn.Parameter(t.randn(n_layers, layer_dim, hidden_dim))
+        self.b_dec_LD = nn.Parameter(t.zeros(n_layers, layer_dim))
+
+        self.lambda_ = 1
+
+        with t.no_grad():
+            self.W_dec_LDH.div_(self.W_dec_LDH.norm(dim=-1, keepdim=True))
+            self.W_dec_LDH.mul_(dec_init_norm)
+
+            # # Initialise W_enc to be the transpose of W_dec
+            self.W_enc_LHD.data = rearrange(
+                self.W_dec_LDH.clone(),
+                "n_layers d_model d_hidden  -> n_layers d_hidden d_model",
+            )
+
+
 
     def encode(self, activation_NLD: t.Tensor) -> t.Tensor:
         """
         activation_NLD: (batch_size, n_layers, layer_dim)
         """
-        hidden_NLH = t.einsum("nld,lhd->nlh", activation_NLD, self.enc_weights_LHD)
-        hidden_NH = t.einsum("nlh->nh", hidden_NLH) + self.enc_bias_H
+        hidden_NLH = t.einsum("nld,lhd->nlh", activation_NLD, self.W_enc_LHD)
+        hidden_NH = t.einsum("nlh->nh", hidden_NLH) + self.b_enc_H
         return t.relu(hidden_NH)
 
     def decode(self, hidden_NH: t.Tensor) -> t.Tensor:
         """
         hidden_NH: (batch_size, hidden_dim)
         """
-        activation_NLD = t.einsum("nh,ldh->nld", hidden_NH, self.dec_weights_LDH)
-        activation_NLD += self.dec_bias_LD
+        activation_NLD = t.einsum("nh,ldh->nld", hidden_NH, self.W_dec_LDH)
+        activation_NLD += self.b_dec_LD
         return activation_NLD
 
     def forward(self, activation_NLD: t.Tensor) -> t.Tensor:
@@ -84,13 +104,18 @@ class AcausalCrosscoder(nn.Module):
         reconstructed_NLD = self.decode(hidden_NH)
         return reconstructed_NLD
 
-    def forward_train(self, activation_NLD: t.Tensor) -> tuple[t.Tensor, t.Tensor]:
+    def forward_train(self, activation_NLD: t.Tensor) -> tuple[t.Tensor, Losses]:
         hidden_NH = self.encode(activation_NLD)
         reconstructed_NLD = self.decode(hidden_NH)
-        reconstruction_loss_ = reconstruction_loss(reconstructed_NLD, activation_NLD)
-        sparsity_loss_ = sparsity_loss(self.dec_weights_LDH, hidden_NH)
-        loss = reconstruction_loss_ + sparsity_loss_
-        return reconstructed_NLD, loss
+
+        losses = Losses(
+            reconstruction_loss=reconstruction_loss(reconstructed_NLD, activation_NLD),
+            sparsity_loss=sparsity_loss(self.W_dec_LDH, hidden_NH),
+        )
+
+        return reconstructed_NLD, losses
+
+
 
 
 def reconstruction_loss(activation_NLD: t.Tensor, target_NLD: t.Tensor) -> t.Tensor:
@@ -99,10 +124,10 @@ def reconstruction_loss(activation_NLD: t.Tensor, target_NLD: t.Tensor) -> t.Ten
     return x_N.mean()
 
 
-def sparsity_loss(dec_weights_LDH: t.Tensor, hidden_NH: t.Tensor) -> t.Tensor:
-    dec_weights_norm_LH = dec_weights_LDH.norm(dim=1)
-    dec_weights_norm_H = t.einsum("lh->h", dec_weights_norm_LH)
-    return t.einsum("nh,h->n", hidden_NH, dec_weights_norm_H).mean()
+def sparsity_loss(W_dec_LDH: t.Tensor, hidden_NH: t.Tensor) -> t.Tensor:
+    W_dec_norm_LH = W_dec_LDH.norm(dim=1)
+    W_dec_norm_H = t.einsum("lh->h", W_dec_norm_LH)
+    return t.einsum("nh,h->n", hidden_NH, W_dec_norm_H).mean()
 
 
 if __name__ == "__main__":
