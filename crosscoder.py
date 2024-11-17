@@ -1,7 +1,10 @@
 from dataclasses import dataclass
-from einops import rearrange
+from einops import rearrange, einsum
 import torch as t
+from constants import DTYPE
 from torch import nn
+
+
 @dataclass
 class Losses:
     reconstruction_loss: t.Tensor
@@ -60,11 +63,11 @@ class AcausalCrosscoder(nn.Module):
     def __init__(self, n_layers: int, layer_dim: int, hidden_dim: int, dec_init_norm: float):
         super().__init__()
 
-        self.W_enc_LHD = nn.Parameter(t.randn(n_layers, hidden_dim, layer_dim))
-        self.b_enc_H = nn.Parameter(t.zeros(hidden_dim))
+        self.W_enc_LHD = nn.Parameter(t.randn(n_layers, hidden_dim, layer_dim, dtype=DTYPE))
+        self.b_enc_H = nn.Parameter(t.zeros(hidden_dim, dtype=DTYPE))
 
-        self.W_dec_LDH = nn.Parameter(t.randn(n_layers, layer_dim, hidden_dim))
-        self.b_dec_LD = nn.Parameter(t.zeros(n_layers, layer_dim))
+        self.W_dec_LDH = nn.Parameter(t.randn(n_layers, layer_dim, hidden_dim, dtype=DTYPE))
+        self.b_dec_LD = nn.Parameter(t.zeros(n_layers, layer_dim, dtype=DTYPE))
 
         self.lambda_ = 1
 
@@ -77,8 +80,6 @@ class AcausalCrosscoder(nn.Module):
                 self.W_dec_LDH.clone(),
                 "n_layers d_model d_hidden  -> n_layers d_hidden d_model",
             )
-
-
 
     def encode(self, activation_NLD: t.Tensor) -> t.Tensor:
         """
@@ -114,8 +115,6 @@ class AcausalCrosscoder(nn.Module):
         )
 
         return reconstructed_NLD, losses
-
-
 
 
 def reconstruction_loss(activation_NLD: t.Tensor, target_NLD: t.Tensor) -> t.Tensor:
