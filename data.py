@@ -36,34 +36,22 @@ tokens:
 """
 
 
-class BufferedActivationLoader:
+class ActivationLoader:
     def __init__(
         self,
         model: HookedTransformer,
         tokenizer: AutoTokenizer,
-        layer_indices_to_encode: list[int],
-        activation_batch_size: int,
-        llm_batch_size: int,
         shuffle_buffer_size: int,
         sequence_length: int,
+        layer_indices_to_encode: list[int],
+        llm_batch_size: int,
     ):
-        """
-        Args:
-            model: the model to load activations from
-            tokenizer: the tokenizer to use to load tokens from the dataset
-            layer_indices_to_encode: which layers to encode
-            activation_batch_size: final batch size that should be returned
-            llm_batch_size: batch size for running tokens through the model
-            shuffle_buffer_size: buffer size for shuffling activations
-            sequence_length: length of the sequences to be loaded
-        """
         self._model = model
         self._tokenizer = tokenizer
         self._sequence_length = sequence_length
-        self._llm_batch_size = llm_batch_size
-        self._batch_size = activation_batch_size
-        self._layer_indices_to_encode = layer_indices_to_encode
         self._shuffle_buffer_size = shuffle_buffer_size
+        self._layer_indices_to_encode = layer_indices_to_encode
+        self._llm_batch_size = llm_batch_size
 
     @cached_property
     def _tokens_iterator(self) -> Iterator[torch.Tensor]:
@@ -86,6 +74,14 @@ class BufferedActivationLoader:
     def _names_filter(self, name: str) -> bool:
         return name in self.names
 
+    def batch_tokens(self, iterator: Iterator[torch.Tensor]) -> Iterator[torch.Tensor]:
+        batch = []
+        for item in iterator:
+            batch.append(item)
+            if len(batch) == self._llm_batch_size:
+                yield torch.stack(batch)
+                batch = []
+
     @cached_property
     def _activation_batch_iterator_NsLD(self) -> Iterator[torch.Tensor]:
         with torch.no_grad():
@@ -106,22 +102,45 @@ class BufferedActivationLoader:
                 yield activation_LD
 
 
+class BufferedActivationLoader:
+    def __init__(
+        self,
+        activation_loader: ActivationLoader,
+        batch_size: int,
+        shuffle_buffer_size: int,
+    ):
+        """
+        Args:
+            model: the model to load activations from
+            tokenizer: the tokenizer to use to load tokens from the dataset
+            layer_indices_to_encode: which layers to encode
+            activation_batch_size: final batch size that should be returned
+            llm_batch_size: batch size for running tokens through the model
+            shuffle_buffer_size: buffer size for shuffling activations
+            sequence_length: length of the sequences to be loaded
+        """
+        self._batch_size = batch_size
+        self._shuffle_buffer_size = shuffle_buffer_size
+        self._activation_loader = activation_loader
+
     def _shuffled_activations_iterator(self) -> Iterator[torch.Tensor]:
         if self._batch_size > self._shuffle_buffer_size // 2:
             raise ValueError("Batch size cannot be greater than half the buffer size")
+        
+        iter = self._activation_loader._activation_iterator_LD
+        sample = next(iter)
 
         buffer_BLD = torch.empty(
-            (self._shuffle_buffer_size, len(self._layer_indices_to_encode), self._sequence_length),
-            self._model.d_model,  # type: ignore
-            dtype=self._model.dtype,  
-            device=self._model.device,
+            (self._shuffle_buffer_size, *sample.shape),
+            dtype=sample.dtype,
+            device=sample.device,
         )
 
         available_indices = set()
         stale_indices = set(range(self._shuffle_buffer_size))
 
         while True:
-            for refill_idx, activation_LD in zip(stale_indices, self._activation_iterator_LD):
+            for refill_idx, activation_LD in zip(stale_indices, self._activation_loader._activation_iterator_LD):
                 buffer_BLD[refill_idx] = activation_LD
                 available_indices.add(refill_idx)
                 stale_indices.remove(refill_idx)
@@ -135,15 +154,6 @@ class BufferedActivationLoader:
 
     def __iter__(self) -> Iterator[torch.Tensor]:
         return self._shuffled_activations_iterator()
-
-
-    def batch_tokens(self, iterator: Iterator[torch.Tensor]) -> Iterator[torch.Tensor]:
-        batch = []
-        for item in iterator:
-            batch.append(item)
-            if len(batch) == self._llm_batch_size:
-                yield torch.stack(batch)
-                batch = []
 
 
 # # following code is copied / adapted from https://github.com/JBloomAUS/SAELens/blob/main/sae_lens/tokenization_and_batching.py
