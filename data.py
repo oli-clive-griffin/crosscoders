@@ -12,8 +12,6 @@ DATASET = "PleIAs/common_corpus"
 PAD_TOKEN = "<pad>"
 
 class BufferedDataloader:
-    """Creates an iterator that yields shuffled batches of tokenized text."""
-
     def __init__(
         self,
         model_name: str,
