@@ -21,7 +21,7 @@ class Losses:
     sparsity_loss: t.Tensor
 
 
-class CausalCrosscoder(nn.Module):
+class StrictlyCausalCrosscoder(nn.Module):
     """crosscoder that maps activations from a single layer to a subset of layers from that layer on (potentially including the input layer)"""
 
     def __init__(self, n_layers_out: int, d_model: int, hidden_dim: int):
@@ -159,7 +159,7 @@ def test():
     assert loss.reconstruction_loss.shape == ()
     assert loss.sparsity_loss.shape == ()
 
-    causal_crosscoder = CausalCrosscoder(
+    causal_crosscoder = StrictlyCausalCrosscoder(
         n_layers_out=n_layers - 1,
         d_model=d_model,
         hidden_dim=hidden_dim,

@@ -7,7 +7,8 @@ from torch.nn.utils import clip_grad_norm_
 
 from constants import DTYPE
 from crosscoder import AcausalCrosscoder
-from data import BufferedDataloader
+from data import BufferedActivationLoader
+
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 # MODEL_NAME = "google/gemma-2-2b"
@@ -39,17 +40,14 @@ def train(cfg: TrainConfig):
         dec_init_norm=cfg.dec_init_norm,
     ).to(DEVICE)
     optimizer = torch.optim.Adam(crosscoder.parameters(), lr=cfg.lr)
-    dataloader = BufferedDataloader(MODEL_NAME, cfg.batch_size, cfg.sequence_length, cfg.buffer_n_sequences)
+    dataloader = BufferedActivationLoader(MODEL_NAME, cfg.batch_size, cfg.sequence_length, cfg.buffer_n_sequences)
     lambda_step = partial(lambda_scheduler, cfg.lambda_max, cfg.lambda_n_steps)
 
-    for step, batch_NS in enumerate(dataloader):
-        batch_NS = batch_NS.to(DEVICE)
+    for step, batch_Ns_LD in enumerate(dataloader):
+        batch_Ns_LD = batch_Ns_LD.to(DEVICE)
         optimizer.zero_grad()
 
-        activations_NsLD = get_activations_NsLD(llm, batch_NS, cfg.n_layers_to_encode)
-        # activations_NsLD = activations_NsLD[:, : cfg.n_layers_to_encode]
-
-        _, losses = crosscoder.forward_train(activations_NsLD)
+        _, losses = crosscoder.forward_train(batch_Ns_LD)
 
         lambda_ = lambda_step(step)
         loss = losses.reconstruction_loss + lambda_ * losses.sparsity_loss
@@ -68,17 +66,6 @@ def lambda_scheduler(lambda_max: float, n_steps: int, step_: int):
         return lambda_max * step_ / n_steps
     else:
         return lambda_max
-
-
-def get_activations_NsLD(llm: HookedTransformer, batch_NS: torch.Tensor, n_layers_to_encode: int) -> torch.Tensor:
-    def names_filter(name: str) -> bool:
-        return any(f"blocks.{num}.hook_resid_post" in name for num in range(n_layers_to_encode))
-
-    with torch.no_grad():
-        _, cache = llm.run_with_cache(batch_NS[:1], names_filter=names_filter)
-    activations_LNSD = cache.stack_activation("resid_post", layer=n_layers_to_encode)
-    activations_NsLD = einops.rearrange(activations_LNSD, "l n s d -> (n s) l d")
-    return activations_NsLD
 
 
 if __name__ == "__main__":
